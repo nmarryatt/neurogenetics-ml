@@ -1,0 +1,11 @@
+mne
+nilearn
+scikit-learn
+shap
+numpy
+scipy
+pandas
+matplotlib
+seaborn
+jupyter
+ipykernel

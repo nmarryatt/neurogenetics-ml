@@ -21,13 +21,13 @@
 
 Alzheimer's disease (AD) is the leading cause of dementia, affecting more than 50 million people worldwide. While no single gene is diagnostic of AD, genetic predisposition plays a significant role in disease onset and progression. The APOE ε4 allele is the strongest known genetic risk factor for late-onset AD, heterozygous carriers face an approximately 3-fold increased risk, while homozygous carriers face up to 14-fold increased risk. PICALM variants represent a secondary, mechanistically distinct risk factor.
 
-Despite their well-established association with AD risk, the mechanisms by which these genes confer susceptibility remain incompletely understood. Critically, their biological effects are thought to manifest decades before any clinical symptoms emerge — suggesting a window in which pre-symptomatic neural changes may be detectable.
+Despite their well-established association with AD risk, the mechanisms by which these genes confer susceptibility remain incompletely understood. Critically, their biological effects are thought to manifest decades before any clinical symptoms emerge, suggesting a window in which pre-symptomatic neural changes may be detectable.
 
 This project investigates whether such changes are measurable through non-invasive brain recordings in cognitively healthy adults. Specifically, it asks:
 1. **Can resting-state EEG and fMRI features predict APOE ε4 carrier status** in cognitively healthy middle-aged adults?
-2. **Which neural features drive that prediction** — and are they consistent with known Alzheimer's biomarkers?
+2. **Which neural features drive that prediction** and are they consistent with known Alzheimer's biomarkers?
 3. **Do the same signatures appear in PICALM risk carriers**, or do these genetically distinct risk pathways produce distinct neural phenotypes?
-4. **Are the findings consistent with current understanding of AD pathology** — and do they support the hypothesis that genetic risk manifests as measurable neural phenotypes decades before clinical onset?
+4. **Are the findings consistent with current understanding of AD pathology** and do they support the hypothesis that genetic risk manifests as measurable neural phenotypes decades before clinical onset?
 
 The approach is motivated by prior work (Dzianok & Kublik, 2025) showing AD-like EEG/fMRI features in asymptomatic APOE/PICALM carriers. This project extends that work by applying machine learning classification with SHAP-based interpretability, enabling feature-level interrogation rather than group-level comparison alone.
 
@@ -67,15 +67,14 @@ cd neurogenetics-ml
 ### 2. Set up the environment
 
 ```bash
-conda env create -f environment.yml
-conda activate neurogenetics-ml
-```
-
-Or with pip:
-
-```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+python -m ipykernel install --user --name neurogenetics-ml --display-name "Python (neurogenetics-ml)"
 ```
+
+In VS Code, open the notebook and select the `Python (neurogenetics-ml)` kernel, or choose the interpreter at `.venv/bin/python`.
 
 ### 3. Download the data
 
