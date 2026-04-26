@@ -1,6 +1,9 @@
 # Data
 data/
 
+# Figures 
+figures/exploratory/
+ 
 # Python
 __pycache__/
 *.pyc
