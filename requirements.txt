@@ -9,3 +9,5 @@ matplotlib
 seaborn
 jupyter
 ipykernel
+pyprep
+autoreject

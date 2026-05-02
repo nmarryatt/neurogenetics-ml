@@ -108,6 +108,7 @@ def plot_psd_comparison(
     title: str = "rest EEG: average PSD across channels",
     save_path: str | Path | None = None,
     posterior_only: bool = False,
+    ax: plt.Axes | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
     """Plot eyes-open vs eyes-closed PSD comparison and optionally save it."""
     if posterior_only:
@@ -117,7 +118,10 @@ def plot_psd_comparison(
     freqs_open, open_mean_db = compute_mean_psd_db(raw_open, fmin=fmin, fmax=fmax)
     freqs_closed, closed_mean_db = compute_mean_psd_db(raw_closed, fmin=fmin, fmax=fmax)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+    else:
+        fig = ax.figure
     ax.plot(freqs_open, open_mean_db, label="Eyes open")
     ax.plot(freqs_closed, closed_mean_db, label="Eyes closed")
     ax.set_xlabel("Frequency (Hz)")
@@ -126,7 +130,7 @@ def plot_psd_comparison(
     ax.legend()
     ax.grid(True, alpha=0.3)
     add_eeg_band_annotations(ax)
-    plt.tight_layout()
+    fig.tight_layout()
 
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
