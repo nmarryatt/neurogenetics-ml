@@ -76,9 +76,19 @@ def compute_mean_psd_db(
     *,
     fmin: float = 1,
     fmax: float = 45,
+    welch_window_s: float = 4.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute Welch PSD and average across channels, returned in dB."""
-    psd = raw.compute_psd(method="welch", fmin=fmin, fmax=fmax)
+    """Compute Welch PSD and average across good EEG channels, returned in dB."""
+    n_per_seg = int(round(raw.info["sfreq"] * welch_window_s))
+    psd = raw.compute_psd(
+        method="welch",
+        fmin=fmin,
+        fmax=fmax,
+        picks="eeg",
+        exclude="bads",
+        n_per_seg=n_per_seg,
+        n_fft=n_per_seg,
+    )
     freqs = psd.freqs
     mean_db = 10 * np.log10(psd.get_data().mean(axis=0))
     return freqs, mean_db
