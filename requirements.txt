@@ -11,3 +11,5 @@ jupyter
 ipykernel
 pyprep
 autoreject
+mne-icalabel
+onnxruntime
