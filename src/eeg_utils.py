@@ -78,7 +78,7 @@ def compute_mean_psd_db(
     fmax: float = 45,
     welch_window_s: float = 4.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute Welch PSD and average across good EEG channels, returned in dB."""
+    """Compute Welch PSD averaged across good EEG channels in dB re: 1 uV^2/Hz."""
     n_per_seg = int(round(raw.info["sfreq"] * welch_window_s))
     psd = raw.compute_psd(
         method="welch",
@@ -90,7 +90,8 @@ def compute_mean_psd_db(
         n_fft=n_per_seg,
     )
     freqs = psd.freqs
-    mean_db = 10 * np.log10(psd.get_data().mean(axis=0))
+    mean_uv2_per_hz = psd.get_data().mean(axis=0) * 1e12
+    mean_db = 10 * np.log10(mean_uv2_per_hz)
     return freqs, mean_db
 
 
@@ -135,7 +136,7 @@ def plot_psd_comparison(
     ax.plot(freqs_open, open_mean_db, label="Eyes open")
     ax.plot(freqs_closed, closed_mean_db, label="Eyes closed")
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel("Power spectral density (dB)")
+    ax.set_ylabel("Power spectral density (dB re: 1 uV^2/Hz)")
     ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.3)
