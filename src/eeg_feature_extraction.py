@@ -27,13 +27,7 @@ CONNECTIVITY_BANDS = {
     "gamma_low": EEG_BANDS["gamma_low"],
 }
 
-REGIONS = {
-    "frontal": ["Fp1", "Fp2", "F3", "F4", "F7", "F8", "Fz"],
-    "central": ["C3", "C4", "Cz"],
-    "temporal": ["T7", "T8", "P7", "P8"],
-    "parietal": ["P3", "P4", "Pz"],
-    "occipital": ["O1", "O2", "Oz"],
-}
+REGIONS: dict[str, list[str]] = {}
 
 PSD_FMIN = 1.0
 PSD_FMAX = 40.0
@@ -160,6 +154,51 @@ def summarize_epoch_files(epoch_index: pd.DataFrame) -> pd.DataFrame:
 def available_channels(epochs: mne.Epochs, requested: list[str]) -> list[str]:
     """Return requested channels present in the epochs object."""
     return [ch for ch in requested if ch in epochs.ch_names]
+
+
+def make_regions_from_prefixes(
+    channel_names: list[str],
+    region_prefixes: dict[str, tuple[str, ...]],
+) -> dict[str, list[str]]:
+    """Assign channel names to broad regions using ordered prefix rules."""
+    assigned: set[str] = set()
+    regions: dict[str, list[str]] = {}
+    for region, prefixes in region_prefixes.items():
+        matches = [
+            ch
+            for ch in channel_names
+            if ch not in assigned and any(ch.startswith(prefix) for prefix in prefixes)
+        ]
+        regions[region] = matches
+        assigned.update(matches)
+    return regions
+
+
+def region_channel_table(epochs: mne.Epochs) -> pd.DataFrame:
+    """Summarize how many good EEG channels are assigned to each region."""
+    eeg_channels = epochs.copy().pick("eeg", exclude="bads").ch_names
+    assigned_channels = set()
+    rows = []
+    for region, requested_channels in REGIONS.items():
+        present_channels = [ch for ch in requested_channels if ch in eeg_channels]
+        assigned_channels.update(present_channels)
+        rows.append(
+            {
+                "region": region,
+                "n_channels": len(present_channels),
+                "channels": ", ".join(present_channels),
+            }
+        )
+
+    unassigned_channels = sorted(set(eeg_channels) - assigned_channels)
+    rows.append(
+        {
+            "region": "unassigned",
+            "n_channels": len(unassigned_channels),
+            "channels": ", ".join(unassigned_channels),
+        }
+    )
+    return pd.DataFrame(rows)
 
 
 def bandpower_from_psd(
