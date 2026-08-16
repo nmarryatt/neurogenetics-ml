@@ -1,4 +1,5 @@
 mne
+mne-connectivity
 nilearn
 scikit-learn
 shap
@@ -13,3 +14,6 @@ pyprep
 autoreject
 mne-icalabel
 onnxruntime
+specparam
+antropy
+pycrostates

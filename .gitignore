@@ -3,6 +3,7 @@ data/
 
 # Figures 
 figures/exploratory/
+.matplotlib/
  
 # Python
 __pycache__/
