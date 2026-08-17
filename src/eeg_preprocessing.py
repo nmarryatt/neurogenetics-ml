@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -13,6 +14,7 @@ from src.eeg_utils import crop_rest_conditions, load_rest_eeg
 
 
 Condition = Literal["eyes_open", "eyes_closed"]
+REST_CONDITIONS: tuple[Condition, Condition] = ("eyes_open", "eyes_closed")
 
 
 DEFAULT_PREP_PARAMS = {
@@ -63,6 +65,266 @@ def subject_id_from_vhdr(vhdr_path: str | Path) -> str:
         if part.startswith("sub-"):
             return part
     return path.name.split("_")[0]
+
+
+def subject_output_dir(output_dir: str | Path, subject_id: str) -> Path:
+    """Return the processed EEG output directory for one subject."""
+    return Path(output_dir) / subject_id / "eeg"
+
+
+def expected_subject_outputs(output_dir: str | Path, subject_id: str) -> list[Path]:
+    """Return the files expected when one subject has finished preprocessing."""
+    out_dir = subject_output_dir(output_dir, subject_id)
+    return [
+        out_dir / f"{subject_id}_task-rest_{condition}_clean-epo.fif"
+        for condition in REST_CONDITIONS
+    ] + [
+        out_dir / f"{subject_id}_task-rest_prep_qc.tsv",
+        out_dir / f"{subject_id}_task-rest_ica_qc.tsv",
+        out_dir / f"{subject_id}_task-rest_epoch_qc.tsv",
+    ]
+
+
+def subject_preprocessing_complete(output_dir: str | Path, subject_id: str) -> bool:
+    """Return True if all expected saved outputs exist for one subject."""
+    return all(path.exists() for path in expected_subject_outputs(output_dir, subject_id))
+
+
+def get_completed_subject_ids(output_dir: str | Path = "data/processed/eeg") -> list[str]:
+    """Find subjects with complete saved preprocessing outputs."""
+    output_dir = Path(output_dir)
+    subject_ids = sorted(path.name for path in output_dir.glob("sub-*") if path.is_dir())
+    return [
+        subject_id
+        for subject_id in subject_ids
+        if subject_preprocessing_complete(output_dir, subject_id)
+    ]
+
+
+def _read_subject_qc(output_dir: str | Path, subject_id: str, qc_name: str) -> pd.DataFrame | None:
+    """Read one per-subject QC file if it exists."""
+    qc_path = subject_output_dir(output_dir, subject_id) / f"{subject_id}_task-rest_{qc_name}_qc.tsv"
+    if not qc_path.exists():
+        return None
+    return pd.read_csv(qc_path, sep="\t")
+
+
+def rebuild_rest_preprocessing_qc(
+    output_dir: str | Path = "data/processed/eeg",
+    *,
+    data_root: str | Path | None = "data/ds004796",
+) -> dict[str, pd.DataFrame]:
+    """Rebuild aggregate preprocessing QC tables from saved per-subject outputs.
+
+    This is useful after a kernel restart because it does not depend on in-memory
+    variables from the original batch run.
+    """
+    output_dir = Path(output_dir)
+    if data_root is not None:
+        expected_subject_ids = [
+            subject_id_from_vhdr(path) for path in find_rest_vhdrs(data_root)
+        ]
+    else:
+        expected_subject_ids = sorted(
+            path.name for path in output_dir.glob("sub-*") if path.is_dir()
+        )
+
+    run_rows = []
+    qc_tables: dict[str, list[pd.DataFrame]] = {
+        "prep": [],
+        "ica": [],
+        "epoch": [],
+    }
+
+    for subject_id in expected_subject_ids:
+        complete = subject_preprocessing_complete(output_dir, subject_id)
+        out_dir = subject_output_dir(output_dir, subject_id)
+        any_outputs = out_dir.exists() and any(out_dir.glob("*"))
+        if complete:
+            status = "ok"
+            error = ""
+        elif any_outputs:
+            status = "partial"
+            missing = [
+                path.name
+                for path in expected_subject_outputs(output_dir, subject_id)
+                if not path.exists()
+            ]
+            error = "Missing outputs: " + ", ".join(missing)
+        else:
+            status = "missing"
+            error = ""
+        run_rows.append({"subject_id": subject_id, "status": status, "error": error})
+
+        for qc_name in qc_tables:
+            qc = _read_subject_qc(output_dir, subject_id, qc_name)
+            if qc is not None:
+                qc_tables[qc_name].append(qc)
+
+    run_qc = pd.DataFrame(run_rows, columns=["subject_id", "status", "error"])
+    prep_qc = (
+        pd.concat(qc_tables["prep"], ignore_index=True)
+        if qc_tables["prep"]
+        else pd.DataFrame()
+    )
+    ica_qc = (
+        pd.concat(qc_tables["ica"], ignore_index=True)
+        if qc_tables["ica"]
+        else pd.DataFrame()
+    )
+    epoch_qc = (
+        pd.concat(qc_tables["epoch"], ignore_index=True)
+        if qc_tables["epoch"]
+        else pd.DataFrame()
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_qc.to_csv(output_dir / "rest_preprocessing_run_qc.tsv", sep="\t", index=False)
+    prep_qc.to_csv(output_dir / "rest_preprocessing_prep_qc.tsv", sep="\t", index=False)
+    ica_qc.to_csv(output_dir / "rest_preprocessing_ica_qc.tsv", sep="\t", index=False)
+    epoch_qc.to_csv(output_dir / "rest_preprocessing_epoch_qc.tsv", sep="\t", index=False)
+
+    return {
+        "run_qc": run_qc,
+        "prep_qc": prep_qc,
+        "ica_qc": ica_qc,
+        "epoch_qc": epoch_qc,
+    }
+
+
+def parse_saved_list(value) -> list:
+    """Parse list-like values stored as strings in QC TSV files."""
+    if isinstance(value, list):
+        return value
+    if pd.isna(value) or value == "":
+        return []
+    try:
+        parsed = ast.literal_eval(str(value))
+        return parsed if isinstance(parsed, list) else [parsed]
+    except (ValueError, SyntaxError):
+        return [str(value)]
+
+
+def make_qc_review_tables(
+    run_qc: pd.DataFrame,
+    prep_qc: pd.DataFrame,
+    ica_qc: pd.DataFrame,
+    epoch_qc: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    """Build review-friendly preprocessing QC tables."""
+    status_summary = (
+        run_qc["status"]
+        .value_counts(dropna=False)
+        .rename_axis("status")
+        .to_frame("n_subjects")
+    )
+    problem_subjects = run_qc.loc[run_qc["status"] != "ok"].copy()
+
+    prep_review = prep_qc.copy()
+    prep_review["still_noisy_channels_list"] = prep_review[
+        "still_noisy_channels"
+    ].apply(parse_saved_list)
+    prep_review["interpolated_channels_list"] = prep_review[
+        "interpolated_channels"
+    ].apply(parse_saved_list)
+
+    prep_most_noisy = prep_review.sort_values(
+        ["n_still_noisy_channels", "n_interpolated_channels"],
+        ascending=False,
+    )[
+        [
+            "subject_id",
+            "condition",
+            "n_still_noisy_channels",
+            "still_noisy_channels",
+            "n_interpolated_channels",
+            "interpolated_channels",
+        ]
+    ]
+
+    prep_still_noisy_channels_long = (
+        prep_review[["subject_id", "condition", "still_noisy_channels_list"]]
+        .explode("still_noisy_channels_list")
+        .dropna(subset=["still_noisy_channels_list"])
+        .rename(columns={"still_noisy_channels_list": "channel"})
+    )
+    prep_still_noisy_channels_long = prep_still_noisy_channels_long.loc[
+        prep_still_noisy_channels_long["channel"] != ""
+    ]
+
+    prep_still_noisy_channel_frequency = (
+        prep_still_noisy_channels_long["channel"]
+        .value_counts()
+        .rename_axis("channel")
+        .to_frame("n_subject_conditions")
+    )
+
+    ica_compact = ica_qc.drop(columns=["icalabel_summary"], errors="ignore").copy()
+    ica_most_removed = ica_compact.sort_values(
+        "n_excluded_components",
+        ascending=False,
+    )
+
+    epoch_review = epoch_qc.copy()
+    epoch_review["excluded_bad_channels_list"] = epoch_review[
+        "excluded_bad_channels"
+    ].apply(parse_saved_list)
+
+    epoch_most_rejected = epoch_review.sort_values(
+        "percent_epochs_dropped",
+        ascending=False,
+    )[
+        [
+            "subject_id",
+            "condition",
+            "n_epochs_before_rejection",
+            "n_epochs_after_rejection",
+            "n_epochs_dropped",
+            "percent_epochs_dropped",
+            "excluded_bad_channels",
+        ]
+    ]
+
+    epoch_excluded_channels_long = (
+        epoch_review[
+            [
+                "subject_id",
+                "condition",
+                "percent_epochs_dropped",
+                "excluded_bad_channels_list",
+            ]
+        ]
+        .explode("excluded_bad_channels_list")
+        .dropna(subset=["excluded_bad_channels_list"])
+        .rename(columns={"excluded_bad_channels_list": "channel"})
+    )
+    epoch_excluded_channels_long = epoch_excluded_channels_long.loc[
+        epoch_excluded_channels_long["channel"] != ""
+    ]
+
+    return {
+        "status_summary": status_summary,
+        "problem_subjects": problem_subjects,
+        "prep_most_noisy": prep_most_noisy,
+        "prep_still_noisy_channel_frequency": prep_still_noisy_channel_frequency,
+        "prep_still_noisy_channels_long": prep_still_noisy_channels_long,
+        "ica_compact": ica_compact,
+        "ica_most_removed": ica_most_removed,
+        "epoch_most_rejected": epoch_most_rejected,
+        "epoch_excluded_channels_long": epoch_excluded_channels_long,
+    }
+
+
+def save_qc_review_tables(
+    qc_review_tables: dict[str, pd.DataFrame],
+    output_dir: str | Path = "data/processed/eeg",
+) -> Path:
+    """Save review-friendly QC tables to disk."""
+    qc_review_dir = Path(output_dir) / "qc_review"
+    qc_review_dir.mkdir(parents=True, exist_ok=True)
+    for name, table in qc_review_tables.items():
+        table.to_csv(qc_review_dir / f"{name}.tsv", sep="\t", index=True)
+    return qc_review_dir
 
 
 def _run_prep(
@@ -366,9 +628,14 @@ def preprocess_all_rest_subjects(
     output_dir: str | Path | None = "data/processed/eeg",
     subject_ids: list[str] | None = None,
     continue_on_error: bool = True,
+    run_all: bool = False,
     **kwargs,
 ) -> tuple[list[RestPreprocessingResult], pd.DataFrame]:
-    """Run the rest EEG preprocessing pipeline across downloaded subjects."""
+    """Run the rest EEG preprocessing pipeline across downloaded subjects.
+
+    If run_all=False, subjects with complete saved outputs are skipped so an
+    interrupted batch can resume from missing or partial subjects.
+    """
     vhdr_paths = find_rest_vhdrs(data_root)
     if subject_ids is not None:
         if not subject_ids:
@@ -380,6 +647,20 @@ def preprocess_all_rest_subjects(
     rows = []
     for vhdr_path in vhdr_paths:
         subject_id = subject_id_from_vhdr(vhdr_path)
+        if (
+            output_dir is not None
+            and not run_all
+            and subject_preprocessing_complete(output_dir, subject_id)
+        ):
+            rows.append(
+                {
+                    "subject_id": subject_id,
+                    "status": "already_processed",
+                    "error": "",
+                }
+            )
+            continue
+
         try:
             result = preprocess_rest_subject(
                 vhdr_path,
@@ -393,26 +674,24 @@ def preprocess_all_rest_subjects(
             if not continue_on_error:
                 raise
 
-    run_qc = pd.DataFrame(rows, columns=["subject_id", "status", "error"])
     if output_dir is not None:
-        out_dir = Path(output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        run_qc.to_csv(out_dir / "rest_preprocessing_run_qc.tsv", sep="\t", index=False)
-        if results:
-            pd.concat([result.prep_qc for result in results], ignore_index=True).to_csv(
-                out_dir / "rest_preprocessing_prep_qc.tsv",
-                sep="\t",
-                index=False,
-            )
-            pd.concat([result.ica_qc for result in results], ignore_index=True).to_csv(
-                out_dir / "rest_preprocessing_ica_qc.tsv",
-                sep="\t",
-                index=False,
-            )
-            pd.concat([result.epoch_qc for result in results], ignore_index=True).to_csv(
-                out_dir / "rest_preprocessing_epoch_qc.tsv",
-                sep="\t",
-                index=False,
-            )
+        rebuilt_qc = rebuild_rest_preprocessing_qc(output_dir, data_root=data_root)
+        rebuilt_run_qc = rebuilt_qc["run_qc"]
+        attempted_run_qc = pd.DataFrame(rows, columns=["subject_id", "status", "error"])
+        run_qc = rebuilt_run_qc.merge(
+            attempted_run_qc,
+            on="subject_id",
+            how="left",
+            suffixes=("", "_this_run"),
+        )
+        run_qc["status_this_run"] = run_qc["status_this_run"].fillna("not_selected")
+        run_qc["error_this_run"] = run_qc["error_this_run"].fillna("")
+        run_qc.to_csv(
+            Path(output_dir) / "rest_preprocessing_run_qc.tsv",
+            sep="\t",
+            index=False,
+        )
+    else:
+        run_qc = pd.DataFrame(rows, columns=["subject_id", "status", "error"])
 
     return results, run_qc
