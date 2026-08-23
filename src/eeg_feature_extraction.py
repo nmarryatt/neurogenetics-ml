@@ -7,6 +7,7 @@ import mne
 import numpy as np
 import pandas as pd
 from scipy.integrate import simpson
+from scipy.sparse.csgraph import shortest_path
 from scipy.stats import kurtosis, skew
 
 from src import eeg_preprocessing
@@ -89,8 +90,8 @@ def feature_family_table() -> pd.DataFrame:
             {
                 "family": "Graph theory",
                 "what_it_summarises": "Network organisation after thresholding the connectivity matrix.",
-                "main_metrics": "density, mean strength, mean clustering",
-                "interpretation": "These compress pairwise connectivity into network-level summaries.",
+                "main_metrics": "density, degree, strength, clustering, path length, efficiency, small-world sigma",
+                "interpretation": "These compress pairwise connectivity into network-level summaries of local clustering and network integration.",
             },
             {
                 "family": "Complexity",
@@ -349,6 +350,133 @@ def compute_aperiodic_features(epochs: mne.Epochs) -> dict[str, float]:
     return features
 
 
+def _graph_integration_metrics(weighted_adjacency: np.ndarray) -> dict[str, float]:
+    """Return path-length and efficiency summaries from a weighted graph."""
+    if weighted_adjacency.size == 0:
+        return {
+            "path_length": np.nan,
+            "global_efficiency": np.nan,
+        }
+
+    distance = np.full_like(weighted_adjacency, np.inf, dtype=float)
+    np.divide(
+        1.0,
+        weighted_adjacency,
+        out=distance,
+        where=weighted_adjacency > 0,
+    )
+    np.fill_diagonal(distance, 0.0)
+    shortest = shortest_path(distance, directed=False, unweighted=False)
+
+    n_nodes = shortest.shape[0]
+    off_diagonal = ~np.eye(n_nodes, dtype=bool)
+    finite_paths = shortest[off_diagonal & np.isfinite(shortest)]
+    characteristic_path_length = (
+        float(np.mean(finite_paths)) if finite_paths.size else np.nan
+    )
+
+    inverse_paths = np.divide(
+        1.0,
+        shortest,
+        out=np.zeros_like(shortest, dtype=float),
+        where=off_diagonal & np.isfinite(shortest) & (shortest > 0),
+    )
+    global_efficiency = float(inverse_paths.sum() / (n_nodes * (n_nodes - 1)))
+
+    return {
+        "path_length": characteristic_path_length,
+        "global_efficiency": global_efficiency,
+    }
+
+
+def _local_efficiency(adjacency: np.ndarray, weighted_adjacency: np.ndarray) -> float:
+    """Return mean global efficiency of each node's neighbourhood."""
+    local_values = []
+    for node_idx in range(adjacency.shape[0]):
+        neighbors = np.flatnonzero(adjacency[node_idx] > 0)
+        if len(neighbors) < 2:
+            continue
+        subgraph = weighted_adjacency[np.ix_(neighbors, neighbors)]
+        local_values.append(_graph_integration_metrics(subgraph)["global_efficiency"])
+    return float(np.nanmean(local_values)) if local_values else np.nan
+
+
+def _binary_path_length(adjacency: np.ndarray) -> float:
+    """Return characteristic path length from a binary graph."""
+    if adjacency.size == 0:
+        return np.nan
+    distance = np.where(adjacency > 0, 1.0, np.inf)
+    np.fill_diagonal(distance, 0.0)
+    shortest = shortest_path(distance, directed=False, unweighted=True)
+    off_diagonal = ~np.eye(shortest.shape[0], dtype=bool)
+    finite_paths = shortest[off_diagonal & np.isfinite(shortest)]
+    return float(np.mean(finite_paths)) if finite_paths.size else np.nan
+
+
+def _small_world_metrics(
+    adjacency: np.ndarray,
+    clustering_mean: float,
+    *,
+    n_random: int = 10,
+    random_state: int = 13,
+) -> dict[str, float]:
+    """Estimate small-world sigma against random graphs with matched density."""
+    n_nodes = adjacency.shape[0]
+    n_edges = int(np.triu(adjacency, k=1).sum())
+    possible_edges = n_nodes * (n_nodes - 1) // 2
+    if n_nodes < 3 or n_edges == 0 or possible_edges == 0:
+        return {
+            "path_length_binary": np.nan,
+            "random_clustering_mean": np.nan,
+            "random_path_length_mean": np.nan,
+            "small_world_sigma": np.nan,
+        }
+
+    observed_path = _binary_path_length(adjacency)
+    rng = np.random.default_rng(random_state)
+    triu = np.triu_indices(n_nodes, k=1)
+    random_clusterings = []
+    random_paths = []
+
+    for _ in range(n_random):
+        selected = rng.choice(possible_edges, size=n_edges, replace=False)
+        random_adj = np.zeros((n_nodes, n_nodes), dtype=float)
+        random_adj[triu[0][selected], triu[1][selected]] = 1.0
+        random_adj = random_adj + random_adj.T
+
+        random_degree = random_adj.sum(axis=1)
+        random_triangles = np.diag(random_adj @ random_adj @ random_adj) / 2
+        random_denominator = random_degree * (random_degree - 1)
+        random_clustering = np.divide(
+            2 * random_triangles,
+            random_denominator,
+            out=np.full_like(random_triangles, np.nan, dtype=float),
+            where=random_denominator > 0,
+        )
+        random_clusterings.append(np.nanmean(random_clustering))
+        random_paths.append(_binary_path_length(random_adj))
+
+    random_clustering_mean = float(np.nanmean(random_clusterings))
+    random_path_mean = float(np.nanmean(random_paths))
+    sigma = np.nan
+    if (
+        np.isfinite(clustering_mean)
+        and np.isfinite(observed_path)
+        and random_clustering_mean > 0
+        and random_path_mean > 0
+    ):
+        sigma = (clustering_mean / random_clustering_mean) / (
+            observed_path / random_path_mean
+        )
+
+    return {
+        "path_length_binary": observed_path,
+        "random_clustering_mean": random_clustering_mean,
+        "random_path_length_mean": random_path_mean,
+        "small_world_sigma": float(sigma),
+    }
+
+
 def compute_connectivity_graph_features(
     epochs: mne.Epochs,
     method: str = "wpli",
@@ -397,12 +525,36 @@ def compute_connectivity_graph_features(
             out=np.full_like(triangles, np.nan, dtype=float),
             where=denominator > 0,
         )
+        integration = _graph_integration_metrics(weighted_adjacency)
+        local_efficiency = _local_efficiency(adjacency, weighted_adjacency)
+        clustering_mean = float(np.nanmean(clustering))
+        small_world = _small_world_metrics(adjacency, clustering_mean)
 
         features[f"graph_{method}_{band_name}_density"] = float(density)
+        features[f"graph_{method}_{band_name}_degree_mean"] = float(np.mean(degree))
+        features[f"graph_{method}_{band_name}_degree_sd"] = float(np.std(degree))
         features[f"graph_{method}_{band_name}_strength_mean"] = float(np.mean(strength))
-        features[f"graph_{method}_{band_name}_clustering_mean"] = float(
-            np.nanmean(clustering)
-        )
+        features[f"graph_{method}_{band_name}_strength_sd"] = float(np.std(strength))
+        features[f"graph_{method}_{band_name}_clustering_mean"] = clustering_mean
+        features[f"graph_{method}_{band_name}_path_length"] = integration[
+            "path_length"
+        ]
+        features[f"graph_{method}_{band_name}_global_efficiency"] = integration[
+            "global_efficiency"
+        ]
+        features[f"graph_{method}_{band_name}_local_efficiency"] = local_efficiency
+        features[f"graph_{method}_{band_name}_path_length_binary"] = small_world[
+            "path_length_binary"
+        ]
+        features[f"graph_{method}_{band_name}_random_clustering_mean"] = small_world[
+            "random_clustering_mean"
+        ]
+        features[f"graph_{method}_{band_name}_random_path_length_mean"] = small_world[
+            "random_path_length_mean"
+        ]
+        features[f"graph_{method}_{band_name}_small_world_sigma"] = small_world[
+            "small_world_sigma"
+        ]
     return features
 
 
