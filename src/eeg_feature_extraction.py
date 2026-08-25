@@ -625,6 +625,46 @@ def extract_all_features(epoch_index: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(feature_rows)
 
 
+def extract_features_resumable(
+    epoch_index: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    subject_ids: list[str] | set[str] | None = None,
+    run_all: bool = False,
+) -> pd.DataFrame:
+    """Extract features row-by-row, saving progress after each subject-condition file."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    selected = epoch_index.copy()
+    if subject_ids is not None:
+        selected = selected.loc[selected["subject_id"].isin(set(subject_ids))].copy()
+
+    existing = pd.DataFrame()
+    completed_keys: set[tuple[str, str]] = set()
+    if output_path.exists() and not run_all:
+        existing = pd.read_csv(output_path, sep="\t")
+        if {"subject_id", "condition"}.issubset(existing.columns):
+            completed_keys = set(zip(existing["subject_id"], existing["condition"]))
+
+    rows = [] if run_all else existing.to_dict("records")
+    for _, row in selected.iterrows():
+        key = (row["subject_id"], row["condition"])
+        if key in completed_keys:
+            print(f"Skipping existing {row['subject_id']} {row['condition']}")
+            continue
+
+        print(f"Extracting {row['subject_id']} {row['condition']}")
+        rows.append(extract_epoch_file_features(row))
+        pd.DataFrame(rows).to_csv(output_path, sep="\t", index=False)
+
+    features = pd.DataFrame(rows)
+    if not features.empty:
+        features = features.sort_values(["subject_id", "condition"]).reset_index(drop=True)
+        features.to_csv(output_path, sep="\t", index=False)
+    return features
+
+
 def save_features(features: pd.DataFrame, features_dir: str | Path) -> Path:
     """Save the feature table as a TSV file."""
     features_dir = Path(features_dir)

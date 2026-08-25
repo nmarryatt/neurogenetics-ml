@@ -45,6 +45,8 @@ def get_rest_marker_times(raw: mne.io.BaseRaw) -> dict[str, float]:
 
     eyes_open_end = find_onset("Stimulus/S 10")
     eyes_closed_end = find_onset("Stimulus/S 11")
+    if eyes_closed_end is None and eyes_closed_start is not None:
+        eyes_closed_end = raw.times[-1]
 
     if None in (eyes_open_start, eyes_open_end, eyes_closed_start, eyes_closed_end):
         raise ValueError("Could not resolve all rest condition markers from annotations.")
