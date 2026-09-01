@@ -4,6 +4,7 @@ data/
 # Figures 
 figures/exploratory/
 .matplotlib/
+pycrostates_data/
  
 # Python
 __pycache__/

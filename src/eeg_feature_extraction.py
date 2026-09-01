@@ -674,6 +674,400 @@ def save_features(features: pd.DataFrame, features_dir: str | Path) -> Path:
     return feature_path
 
 
+def save_article_psd_band_figure(
+    freqs: np.ndarray,
+    mean_psd: np.ndarray,
+    output_dir: str | Path,
+    *,
+    label: str,
+) -> Path:
+    """Save a PSD figure with the configured EEG bands shaded."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig_path = output_dir / "spectral_psd_bands.png"
+
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    ax.plot(freqs, mean_psd * 1e12, color="black", linewidth=1.8, label=label)
+
+    band_colors = {
+        "delta": "#9ecae1",
+        "theta": "#a1d99b",
+        "alpha": "#fdae6b",
+        "beta": "#bcbddc",
+        "gamma_low": "#fdd0a2",
+    }
+    for band_name, (fmin, fmax) in EEG_BANDS.items():
+        ax.axvspan(fmin, fmax, color=band_colors.get(band_name, "grey"), alpha=0.25)
+        ax.text(
+            (fmin + fmax) / 2,
+            ax.get_ylim()[1] * 0.92,
+            band_name,
+            ha="center",
+            va="top",
+            fontsize=9,
+        )
+
+    ax.set_xlim(PSD_FMIN, PSD_FMAX)
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("PSD (uV^2/Hz)")
+    ax.set_title("Power spectral density with EEG frequency bands")
+    ax.legend(frameon=False)
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=300)
+    plt.show()
+    return fig_path
+
+
+def save_article_specparam_figure(model, output_dir: str | Path) -> Path:
+    """Save the specparam model plot."""
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig_path = output_dir / "aperiodic_specparam_fit.png"
+
+    model.plot()
+    fig = plt.gcf()
+    fig.set_size_inches(8, 4.8)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=300, bbox_inches="tight")
+    plt.show()
+    return fig_path
+
+
+def save_article_epoch_trace_figure(
+    epochs: mne.Epochs,
+    output_dir: str | Path,
+    *,
+    epoch_idx: int = 0,
+    channel_idx: int = 0,
+) -> Path:
+    """Save one cleaned time-domain EEG epoch trace."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig_path = output_dir / "time_domain_single_epoch_trace.png"
+
+    eeg_epochs = epochs.copy().pick("eeg", exclude="bads")
+    data_uv = eeg_epochs.get_data() * 1e6
+    channel_name = eeg_epochs.ch_names[channel_idx]
+
+    fig, ax = plt.subplots(figsize=(9, 3.8))
+    ax.plot(epochs.times, data_uv[epoch_idx, channel_idx], color="#2b6cb0", linewidth=1.2)
+    ax.axhline(0, color="black", linewidth=0.8, alpha=0.4)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Amplitude (uV)")
+    ax.set_title(f"One cleaned 2-second EEG epoch: {channel_name}")
+    sns.despine()
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=300)
+    plt.show()
+    return fig_path
+
+
+def save_article_connectivity_matrix_figure(
+    matrix: np.ndarray,
+    output_dir: str | Path,
+) -> Path:
+    """Save a heatmap of one frequency-band connectivity matrix."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig_path = output_dir / "connectivity_alpha_wpli_matrix.png"
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    sns.heatmap(
+        matrix,
+        cmap="viridis",
+        square=True,
+        xticklabels=False,
+        yticklabels=False,
+        cbar_kws={"label": "wPLI"},
+        ax=ax,
+    )
+    ax.set_title("Alpha-band wPLI connectivity matrix")
+    ax.set_xlabel("EEG channels")
+    ax.set_ylabel("EEG channels")
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=300)
+    plt.show()
+    return fig_path
+
+
+def run_microstate_article_pilot(
+    epoch_index: pd.DataFrame,
+    output_dir: str | Path,
+    *,
+    n_subjects: int = 5,
+    condition: str = "eyes_closed",
+    n_clusters: int = 4,
+    n_init: int = 10,
+    random_state: int = 42,
+) -> pd.Series:
+    """Run a small GFP-peak microstate pilot and save article outputs."""
+    import time
+
+    import matplotlib.pyplot as plt
+    from mne.viz import plot_topomap
+    from pycrostates.cluster import ModKMeans
+    from pycrostates.preprocessing import extract_gfp_peaks
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    subject_ids = sorted(epoch_index["subject_id"].unique())[:n_subjects]
+    pilot_rows = epoch_index.loc[
+        epoch_index["subject_id"].isin(subject_ids)
+        & (epoch_index["condition"] == condition)
+    ].sort_values("subject_id")
+
+    loaded_epochs = [
+        load_epochs(row["path"]).copy().pick("eeg", exclude="bads")
+        for _, row in pilot_rows.iterrows()
+    ]
+    common_channels = sorted(set.intersection(*(set(ep.ch_names) for ep in loaded_epochs)))
+    loaded_epochs = [ep.copy().pick(common_channels) for ep in loaded_epochs]
+    mne.equalize_channels(loaded_epochs, copy=False)
+    combined_epochs = mne.concatenate_epochs(loaded_epochs, add_offset=True, verbose=False)
+
+    start = time.time()
+    gfp_peaks = extract_gfp_peaks(
+        combined_epochs,
+        picks="eeg",
+        return_all=False,
+        min_peak_distance=2,
+        verbose="ERROR",
+    )
+    gfp_peak_seconds = time.time() - start
+
+    start = time.time()
+    model = ModKMeans(
+        n_clusters=n_clusters,
+        n_init=n_init,
+        max_iter=300,
+        tol=1e-5,
+        random_state=random_state,
+    )
+    model.fit(gfp_peaks, picks="eeg", n_jobs=1, verbose="ERROR")
+    template_fit_seconds = time.time() - start
+
+    start = time.time()
+    segmentation = model.predict(combined_epochs, reject_edges=True, verbose="ERROR")
+    backfit_seconds = time.time() - start
+    parameters = segmentation.compute_parameters()
+
+    centers = model.cluster_centers_
+    vlim = max(abs(centers.min()), abs(centers.max()))
+    fig, axes = plt.subplots(1, centers.shape[0], figsize=(9, 2.8), constrained_layout=True)
+    for idx, ax in enumerate(axes):
+        plot_topomap(
+            centers[idx],
+            model.info,
+            axes=ax,
+            show=False,
+            contours=0,
+            cmap="RdBu_r",
+            vlim=(-vlim, vlim),
+            sensors=True,
+        )
+        ax.set_title(f"Microstate {idx + 1}")
+    fig.suptitle(f"Microstate templates from {n_subjects}-subject {condition} pilot")
+    fig.savefig(
+        output_dir / "microstate_pilot_5_subject_templates.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.show()
+
+    summary = pd.Series(
+        {
+            "n_subjects": int(pilot_rows["subject_id"].nunique()),
+            "subject_ids": ", ".join(pilot_rows["subject_id"].tolist()),
+            "condition": condition,
+            "n_epoch_files": int(len(pilot_rows)),
+            "n_epochs_total": int(len(combined_epochs)),
+            "n_common_channels": int(len(common_channels)),
+            "n_gfp_peaks": int(gfp_peaks.get_data().shape[1]),
+            "n_microstates": n_clusters,
+            "n_init": n_init,
+            "gfp_peak_seconds": gfp_peak_seconds,
+            "template_fit_seconds": template_fit_seconds,
+            "backfit_seconds": backfit_seconds,
+            "total_seconds": gfp_peak_seconds + template_fit_seconds + backfit_seconds,
+            "total_minutes": (gfp_peak_seconds + template_fit_seconds + backfit_seconds) / 60,
+            "global_explained_variance": float(model.GEV_),
+            **{f"microstate_{key}": value for key, value in parameters.items()},
+        }
+    )
+    summary.to_frame("value").to_csv(
+        output_dir / "microstate_pilot_5_subject_summary.tsv",
+        sep="\t",
+    )
+    return summary
+
+
+def fit_microstate_templates(
+    epoch_index: pd.DataFrame,
+    subject_ids: list[str] | set[str],
+    output_dir: str | Path,
+    *,
+    condition: str = "eyes_closed",
+    n_clusters: int = 4,
+    n_init: int = 10,
+    random_state: int = 42,
+    min_peak_distance: int = 2,
+):
+    """Fit microstate templates on selected training subjects only."""
+    import time
+
+    import matplotlib.pyplot as plt
+    from mne.viz import plot_topomap
+    from pycrostates.cluster import ModKMeans
+    from pycrostates.preprocessing import extract_gfp_peaks
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected = epoch_index.loc[
+        epoch_index["subject_id"].isin(set(subject_ids))
+        & (epoch_index["condition"] == condition)
+    ].sort_values("subject_id")
+    if selected.empty:
+        raise ValueError(f"No {condition} epoch files found for selected subjects.")
+
+    loaded_epochs = [
+        load_epochs(row["path"]).copy().pick("eeg", exclude="bads")
+        for _, row in selected.iterrows()
+    ]
+    common_channels = sorted(set.intersection(*(set(ep.ch_names) for ep in loaded_epochs)))
+    loaded_epochs = [ep.copy().pick(common_channels) for ep in loaded_epochs]
+    mne.equalize_channels(loaded_epochs, copy=False)
+    combined_epochs = mne.concatenate_epochs(loaded_epochs, add_offset=True, verbose=False)
+
+    start = time.time()
+    gfp_peaks = extract_gfp_peaks(
+        combined_epochs,
+        picks="eeg",
+        return_all=False,
+        min_peak_distance=min_peak_distance,
+        verbose="ERROR",
+    )
+    gfp_peak_seconds = time.time() - start
+
+    start = time.time()
+    model = ModKMeans(
+        n_clusters=n_clusters,
+        n_init=n_init,
+        max_iter=300,
+        tol=1e-5,
+        random_state=random_state,
+    )
+    model.fit(gfp_peaks, picks="eeg", n_jobs=1, verbose="ERROR")
+    template_fit_seconds = time.time() - start
+
+    centers = model.cluster_centers_
+    vlim = max(abs(centers.min()), abs(centers.max()))
+    fig, axes = plt.subplots(1, centers.shape[0], figsize=(9, 2.8), constrained_layout=True)
+    for idx, ax in enumerate(axes):
+        plot_topomap(
+            centers[idx],
+            model.info,
+            axes=ax,
+            show=False,
+            contours=0,
+            cmap="RdBu_r",
+            vlim=(-vlim, vlim),
+            sensors=True,
+        )
+        ax.set_title(f"Microstate {idx + 1}")
+    fig.suptitle(f"Training-derived microstate templates: {condition}")
+    figure_path = output_dir / f"microstate_{condition}_training_templates.png"
+    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    summary = pd.Series(
+        {
+            "condition": condition,
+            "n_training_subjects": int(selected["subject_id"].nunique()),
+            "n_epoch_files": int(len(selected)),
+            "n_epochs_total": int(len(combined_epochs)),
+            "n_common_channels": int(len(common_channels)),
+            "n_gfp_peaks": int(gfp_peaks.get_data().shape[1]),
+            "n_microstates": n_clusters,
+            "n_init": n_init,
+            "gfp_peak_seconds": gfp_peak_seconds,
+            "template_fit_seconds": template_fit_seconds,
+            "total_fit_seconds": gfp_peak_seconds + template_fit_seconds,
+            "total_fit_minutes": (gfp_peak_seconds + template_fit_seconds) / 60,
+            "global_explained_variance": float(model.GEV_),
+            "template_figure_path": str(figure_path),
+        }
+    )
+    summary.to_frame("value").to_csv(
+        output_dir / f"microstate_{condition}_training_template_summary.tsv",
+        sep="\t",
+    )
+    return model, summary
+
+
+def backfit_microstate_features(
+    epoch_index: pd.DataFrame,
+    model,
+    output_path: str | Path,
+    *,
+    subject_ids: list[str] | set[str] | None = None,
+    condition: str = "eyes_closed",
+    run_all: bool = False,
+) -> pd.DataFrame:
+    """Backfit fitted microstate templates to subject-condition epoch files."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    selected = epoch_index.loc[epoch_index["condition"] == condition].copy()
+    if subject_ids is not None:
+        selected = selected.loc[selected["subject_id"].isin(set(subject_ids))].copy()
+
+    existing = pd.DataFrame()
+    completed_subjects: set[str] = set()
+    if output_path.exists() and not run_all:
+        existing = pd.read_csv(output_path, sep="\t")
+        if "subject_id" in existing.columns:
+            completed_subjects = set(existing["subject_id"])
+
+    rows = [] if run_all else existing.to_dict("records")
+    model_channels = list(model.info["ch_names"])
+    for _, row in selected.iterrows():
+        subject_id = row["subject_id"]
+        if subject_id in completed_subjects:
+            print(f"Skipping existing microstates {subject_id} {condition}")
+            continue
+
+        print(f"Backfitting microstates {subject_id} {condition}")
+        epochs = load_epochs(row["path"]).copy().pick(model_channels)
+        segmentation = model.predict(epochs, reject_edges=True, verbose="ERROR")
+        parameters = segmentation.compute_parameters()
+        feature_row = {
+            "subject_id": subject_id,
+            "condition": condition,
+            **{f"microstate_{key}": value for key, value in parameters.items()},
+        }
+        rows.append(feature_row)
+        pd.DataFrame(rows).to_csv(output_path, sep="\t", index=False)
+
+    features = pd.DataFrame(rows)
+    if not features.empty:
+        features = features.sort_values(["subject_id", "condition"]).reset_index(drop=True)
+        features.to_csv(output_path, sep="\t", index=False)
+    return features
+
+
 def microstate_note() -> str:
     """Return the current microstate implementation note."""
     if util.find_spec("pycrostates") is None:
