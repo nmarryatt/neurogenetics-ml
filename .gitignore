@@ -3,6 +3,7 @@ data/
 
 # Figures 
 figures/exploratory/
+reports/
 .matplotlib/
 pycrostates_data/
  
