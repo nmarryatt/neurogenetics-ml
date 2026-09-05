@@ -645,6 +645,10 @@ def extract_features_resumable(
     if output_path.exists() and not run_all:
         existing = pd.read_csv(output_path, sep="\t")
         if {"subject_id", "condition"}.issubset(existing.columns):
+            existing = existing.drop_duplicates(
+                ["subject_id", "condition"],
+                keep="last",
+            )
             completed_keys = set(zip(existing["subject_id"], existing["condition"]))
 
     rows = [] if run_all else existing.to_dict("records")
@@ -919,13 +923,20 @@ def fit_microstate_templates(
     subject_ids: list[str] | set[str],
     output_dir: str | Path,
     *,
+    channel_subject_ids: list[str] | set[str] | None = None,
     condition: str = "eyes_closed",
     n_clusters: int = 4,
     n_init: int = 10,
     random_state: int = 42,
     min_peak_distance: int = 2,
+    max_epochs_per_subject: int | None = 30,
 ):
-    """Fit microstate templates on selected training subjects only."""
+    """Fit microstate templates on selected training subjects only.
+
+    If channel_subject_ids is provided, the channel set is restricted to channels
+    present across those subjects before fitting. This lets training-derived
+    templates be backfit to held-out subjects with different rejected channels.
+    """
     import time
 
     import matplotlib.pyplot as plt
@@ -942,12 +953,32 @@ def fit_microstate_templates(
     if selected.empty:
         raise ValueError(f"No {condition} epoch files found for selected subjects.")
 
+    channel_rows = selected
+    if channel_subject_ids is not None:
+        channel_rows = epoch_index.loc[
+            epoch_index["subject_id"].isin(set(channel_subject_ids))
+            & (epoch_index["condition"] == condition)
+        ].sort_values("subject_id")
+        if channel_rows.empty:
+            raise ValueError(f"No {condition} epoch files found for channel_subject_ids.")
+
+    channel_epochs = [
+        load_epochs(row["path"]).copy().pick("eeg", exclude="bads")
+        for _, row in channel_rows.iterrows()
+    ]
+    common_channels = sorted(set.intersection(*(set(ep.ch_names) for ep in channel_epochs)))
+    del channel_epochs
+
     loaded_epochs = [
         load_epochs(row["path"]).copy().pick("eeg", exclude="bads")
         for _, row in selected.iterrows()
     ]
-    common_channels = sorted(set.intersection(*(set(ep.ch_names) for ep in loaded_epochs)))
-    loaded_epochs = [ep.copy().pick(common_channels) for ep in loaded_epochs]
+    loaded_epochs = [
+        ep.copy().pick(common_channels)[:max_epochs_per_subject]
+        if max_epochs_per_subject is not None
+        else ep.copy().pick(common_channels)
+        for ep in loaded_epochs
+    ]
     mne.equalize_channels(loaded_epochs, copy=False)
     combined_epochs = mne.concatenate_epochs(loaded_epochs, add_offset=True, verbose=False)
 
@@ -997,6 +1028,7 @@ def fit_microstate_templates(
             "condition": condition,
             "n_training_subjects": int(selected["subject_id"].nunique()),
             "n_epoch_files": int(len(selected)),
+            "max_epochs_per_subject": max_epochs_per_subject,
             "n_epochs_total": int(len(combined_epochs)),
             "n_common_channels": int(len(common_channels)),
             "n_gfp_peaks": int(gfp_peaks.get_data().shape[1]),
@@ -1015,6 +1047,46 @@ def fit_microstate_templates(
         sep="\t",
     )
     return model, summary
+
+
+def fit_microstate_templates_by_condition(
+    epoch_index: pd.DataFrame,
+    subject_ids: list[str] | set[str],
+    output_dir: str | Path,
+    *,
+    channel_subject_ids: list[str] | set[str] | None = None,
+    conditions: tuple[str, ...] = ("eyes_closed",),
+    n_clusters: int = 4,
+    n_init: int = 10,
+    random_state: int = 42,
+    min_peak_distance: int = 2,
+    max_epochs_per_subject: int | None = 30,
+) -> dict[str, object]:
+    """Fit separate training-derived microstate templates for each condition."""
+    models = {}
+    summaries = []
+    for condition in conditions:
+        model, summary = fit_microstate_templates(
+            epoch_index,
+            subject_ids,
+            output_dir,
+            channel_subject_ids=channel_subject_ids,
+            condition=condition,
+            n_clusters=n_clusters,
+            n_init=n_init,
+            random_state=random_state,
+            min_peak_distance=min_peak_distance,
+            max_epochs_per_subject=max_epochs_per_subject,
+        )
+        models[condition] = model
+        summaries.append(summary.rename(condition))
+
+    summary_table = pd.DataFrame(summaries)
+    summary_table.to_csv(
+        Path(output_dir) / "microstate_training_template_summary_by_condition.tsv",
+        sep="\t",
+    )
+    return {"models": models, "summary": summary_table}
 
 
 def backfit_microstate_features(
@@ -1039,6 +1111,7 @@ def backfit_microstate_features(
     if output_path.exists() and not run_all:
         existing = pd.read_csv(output_path, sep="\t")
         if "subject_id" in existing.columns:
+            existing = existing.drop_duplicates(["subject_id", "condition"], keep="last")
             completed_subjects = set(existing["subject_id"])
 
     rows = [] if run_all else existing.to_dict("records")
@@ -1050,7 +1123,15 @@ def backfit_microstate_features(
             continue
 
         print(f"Backfitting microstates {subject_id} {condition}")
-        epochs = load_epochs(row["path"]).copy().pick(model_channels)
+        epochs = load_epochs(row["path"]).copy()
+        missing_channels = [ch for ch in model_channels if ch not in epochs.ch_names]
+        if missing_channels:
+            raise ValueError(
+                f"{subject_id} is missing channels required by the microstate model: "
+                f"{missing_channels}. Refit templates with channel_subject_ids including "
+                "all subjects you plan to backfit."
+            )
+        epochs = epochs.pick(model_channels)
         segmentation = model.predict(epochs, reject_edges=True, verbose="ERROR")
         parameters = segmentation.compute_parameters()
         feature_row = {
@@ -1060,6 +1141,70 @@ def backfit_microstate_features(
         }
         rows.append(feature_row)
         pd.DataFrame(rows).to_csv(output_path, sep="\t", index=False)
+
+    features = pd.DataFrame(rows)
+    if not features.empty:
+        features = features.sort_values(["subject_id", "condition"]).reset_index(drop=True)
+        features.to_csv(output_path, sep="\t", index=False)
+    return features
+
+
+def backfit_microstate_features_by_condition(
+    epoch_index: pd.DataFrame,
+    models: dict[str, object],
+    output_path: str | Path,
+    *,
+    subject_ids: list[str] | set[str] | None = None,
+    run_all: bool = False,
+) -> pd.DataFrame:
+    """Backfit condition-specific microstate templates to matching condition files."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = pd.DataFrame()
+    completed_keys: set[tuple[str, str]] = set()
+    if output_path.exists() and not run_all:
+        existing = pd.read_csv(output_path, sep="\t")
+        if {"subject_id", "condition"}.issubset(existing.columns):
+            existing = existing.drop_duplicates(
+                ["subject_id", "condition"],
+                keep="last",
+            )
+            completed_keys = set(zip(existing["subject_id"], existing["condition"]))
+
+    rows = [] if run_all else existing.to_dict("records")
+    selected_subjects = set(subject_ids) if subject_ids is not None else None
+    for condition, model in models.items():
+        selected = epoch_index.loc[epoch_index["condition"] == condition].copy()
+        if selected_subjects is not None:
+            selected = selected.loc[selected["subject_id"].isin(selected_subjects)].copy()
+
+        model_channels = list(model.info["ch_names"])
+        for _, row in selected.iterrows():
+            key = (row["subject_id"], row["condition"])
+            if key in completed_keys:
+                print(f"Skipping existing microstates {row['subject_id']} {condition}")
+                continue
+
+            print(f"Backfitting microstates {row['subject_id']} {condition}")
+            epochs = load_epochs(row["path"]).copy()
+            missing_channels = [ch for ch in model_channels if ch not in epochs.ch_names]
+            if missing_channels:
+                raise ValueError(
+                    f"{row['subject_id']} {condition} is missing channels required by "
+                    f"the microstate model: {missing_channels}."
+                )
+            epochs = epochs.pick(model_channels)
+            segmentation = model.predict(epochs, reject_edges=True, verbose="ERROR")
+            parameters = segmentation.compute_parameters()
+            rows.append(
+                {
+                    "subject_id": row["subject_id"],
+                    "condition": condition,
+                    **{f"microstate_{key}": value for key, value in parameters.items()},
+                }
+            )
+            pd.DataFrame(rows).to_csv(output_path, sep="\t", index=False)
 
     features = pd.DataFrame(rows)
     if not features.empty:
