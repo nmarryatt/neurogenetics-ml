@@ -17,3 +17,4 @@ onnxruntime
 specparam
 antropy
 pycrostates
+xgboost
